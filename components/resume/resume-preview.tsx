@@ -1,4 +1,4 @@
-import React, { useState, forwardRef, useImperativeHandle } from "react";
+import React, { useState, forwardRef, useImperativeHandle, useRef } from "react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Linkedin, Github, Globe, Mail, Phone, MapPin, Download, Edit, Check, X, Sparkles, FileText, Briefcase, GraduationCap, Code, Award, Link as LinkIcon, Loader2 } from "lucide-react";
@@ -10,6 +10,7 @@ import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, Unde
 import { saveAs } from 'file-saver';
 import { RESUME_TEMPLATES } from '@/lib/resume-template-data';
 import { exportToLaTeXFile } from "@/lib/resume/latex-exporter";
+import { logger } from "@/lib/logger";
 
 interface ResumeData {
   name?: string;
@@ -151,24 +152,39 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
     });
   }
 
+  const getSkillsString = () => {
+    const s = editableResume.skills || safeResume.skills || {};
+    const allSkills = [
+      ...(s.technical || []),
+      ...(s.programming || []),
+      ...(s.tools || []),
+      ...(s.soft || [])
+    ];
+    return allSkills.filter(Boolean).join(", ");
+  };
+
   const EditableText = ({
     value,
     onChange,
     className,
     multiline,
+    disabled,
   }: {
     value: string;
     onChange: (val: string) => void;
     className?: string;
     multiline?: boolean;
+    disabled?: boolean;
   }) => {
     if (multiline) {
       return (
         <textarea
           value={value}
           onChange={(e) => onChange(e.target.value)}
+          disabled={disabled}
           className={cn(
             "w-full resize-none bg-transparent border-none p-0 m-0 font-sans text-gray-900 focus:outline-none focus:ring-0",
+            disabled && "text-gray-400 cursor-not-allowed",
             className
           )}
           rows={3}
@@ -180,8 +196,10 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
         type="text"
         value={value}
         onChange={(e) => onChange(e.target.value)}
+        disabled={disabled}
         className={cn(
           "bg-transparent border-none p-0 m-0 font-sans text-gray-900 focus:outline-none focus:ring-0 w-full",
+          disabled && "text-gray-400 cursor-not-allowed",
           className
         )}
       />
@@ -192,36 +210,158 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
     items,
     onChange,
     className,
+    aiContext,
   }: {
     items: string[];
     onChange: (newItems: string[]) => void;
     className?: string;
+    aiContext?: { title?: string; company?: string; skills?: string; };
   }) => {
+    const [enhancingIdx, setEnhancingIdx] = useState<number | null>(null);
+    const itemsRef = useRef(items);
+    itemsRef.current = items;
+
     function updateItem(idx: number, val: string) {
+      if (enhancingIdx !== null) return;
       const newItems = [...items];
       newItems[idx] = val;
       onChange(newItems);
     }
     function addItem() {
+      if (enhancingIdx !== null) return;
       onChange([...items, ""]);
     }
     function removeItem(idx: number) {
+      if (enhancingIdx !== null) return;
       const newItems = items.filter((_, i) => i !== idx);
       onChange(newItems);
     }
+
+    async function handleEnhance(idx: number) {
+      if (enhancingIdx !== null) return;
+      const bulletText = items[idx];
+      if (!bulletText || !bulletText.trim()) {
+        toast({
+          title: "Empty bullet point",
+          description: "Please write some text before enhancing it.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      const originalBullet = items[idx];
+      setEnhancingIdx(idx);
+
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 15000);
+
+      try {
+        const response = await fetch("/api/resume/enhance-bullet", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            bullet: bulletText,
+            title: aiContext?.title,
+            company: aiContext?.company,
+            skills: aiContext?.skills,
+          }),
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          throw new Error(errorData.error || "Failed to enhance bullet point");
+        }
+
+        const data = await response.json();
+        const enhancedBullet = typeof data?.enhancedBullet === "string" ? data.enhancedBullet.trim() : "";
+
+        if (enhancedBullet) {
+          if (itemsRef.current[idx] === originalBullet) {
+            const newItems = [...itemsRef.current];
+            newItems[idx] = enhancedBullet;
+            onChange(newItems);
+            toast({
+              title: "Enhancement successful",
+              description: "Your bullet point has been enhanced with action-oriented metrics!",
+            });
+          } else {
+            toast({
+              title: "Bullet point was edited",
+              description: "The bullet was modified while enhancing. Enhancement result was discarded.",
+              variant: "destructive",
+            });
+          }
+        } else {
+          throw new Error("AI did not return a valid enhanced bullet");
+        }
+      } catch (error: any) {
+        if (error?.name === "AbortError") {
+          toast({
+            title: "Enhancement timed out",
+            description: "The request took too long to respond (15s limit reached). Please try again.",
+            variant: "destructive",
+          });
+        } else {
+          toast({
+            title: "Enhancement failed",
+            description: error.message || "Something went wrong while enhancing the bullet.",
+            variant: "destructive",
+          });
+        }
+      } finally {
+        window.clearTimeout(timeoutId);
+        setEnhancingIdx(null);
+      }
+    }
+
     return (
       <div className={className}>
         {items.map((item, i) => (
-          <div key={i} className="flex gap-2 items-center mb-1">
+          <div key={i} className="flex gap-2 items-center mb-1 w-full">
             <EditableText
               value={item}
               onChange={(val) => updateItem(i, val)}
+              disabled={enhancingIdx !== null}
               className="flex-grow"
             />
+            {aiContext && (
+              <button
+                type="button"
+                onClick={() => handleEnhance(i)}
+                disabled={enhancingIdx !== null}
+                className={cn(
+                  "flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-semibold shadow-sm transition-all duration-200 shrink-0",
+                  enhancingIdx === i
+                    ? "bg-purple-100 text-purple-700 animate-pulse border border-purple-200 cursor-not-allowed"
+                    : "bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white hover:scale-105 active:scale-95 hover:shadow-md hover:shadow-indigo-500/20",
+                  enhancingIdx !== null && enhancingIdx !== i && "opacity-50 cursor-not-allowed"
+                )}
+                title="AI Enhance bullet point with action-oriented metrics"
+              >
+                {enhancingIdx === i ? (
+                  <>
+                    <Loader2 className="h-3 w-3 animate-spin text-purple-700" />
+                    <span>Enhancing...</span>
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="h-3 w-3 text-white" />
+                    <span>AI Enhance</span>
+                  </>
+                )}
+              </button>
+            )}
             <button
               type="button"
               onClick={() => removeItem(i)}
-              className="text-red-500 font-bold hover:text-red-700 px-2"
+              disabled={enhancingIdx !== null}
+              className={cn(
+                "text-red-500 font-bold hover:text-red-700 px-2 shrink-0",
+                enhancingIdx !== null && "opacity-50 cursor-not-allowed"
+              )}
             >
               &times;
             </button>
@@ -230,7 +370,11 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
         <button
           type="button"
           onClick={addItem}
-          className="text-blue-600 underline text-sm mt-1 hover:text-blue-800"
+          disabled={enhancingIdx !== null}
+          className={cn(
+            "text-blue-600 underline text-sm mt-1 hover:text-blue-800",
+            enhancingIdx !== null && "opacity-50 cursor-not-allowed"
+          )}
         >
           + Add
         </button>
@@ -242,6 +386,21 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
     setIsExporting(true);
     
     try {
+      // First try the new @react-pdf/renderer vector PDF export for highest quality
+      try {
+        const { generateReactPDF } = await import('@/lib/resume/pdf-exporter');
+        await generateReactPDF(safeResume as any, template, isCV);
+        
+        toast({
+          title: `${isCV ? 'CV' : 'Resume'} exported!`,
+          description: `Your ${isCV ? 'CV' : 'resume'} has been downloaded as a high-quality PDF.`,
+        });
+        return; // Success! Exit early.
+      } catch (reactPdfError) {
+        logger.error(null, 'Vector PDF generation failed, falling back to html2canvas:', reactPdfError);
+        // Fall back to html2canvas if React PDF fails
+      }
+
       const element = document.getElementById('resume-content');
       if (!element) throw new Error('Resume content element not found');
       
@@ -309,7 +468,7 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
         description: `Your ${isCV ? 'CV' : 'resume'} has been downloaded as a PDF.`,
       });
     } catch (error) {
-      console.error('Error exporting to PDF:', error);
+      logger.error(null, 'Error exporting to PDF:', error);
       toast({
         title: "Export failed",
         description: `Failed to export ${isCV ? 'CV' : 'resume'} to PDF. Please try again.`,
@@ -574,7 +733,7 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
         description: `${fileName} has been downloaded.`,
       });
     } catch (error) {
-      console.error('Error exporting to Word:', error);
+      logger.error(null, 'Error exporting to Word:', error);
       toast({
         title: "Export failed",
         description: "There was an error exporting to Word format.",
@@ -594,7 +753,7 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
         description: `Your LaTeX source has been downloaded.`,
       });
     } catch (error) {
-      console.error('Error exporting to LaTeX:', error);
+      logger.error(null, 'Error exporting to LaTeX:', error);
       toast({
         title: "Export failed",
         description: "There was an error exporting to LaTeX format.",
@@ -801,6 +960,11 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
                           onChange={(newDesc) =>
                             updateField(["experience", i.toString(), "description"], newDesc)
                           }
+                          aiContext={{
+                            title: exp.title,
+                            company: exp.company,
+                            skills: getSkillsString(),
+                          }}
                         />
                       ) : (
                         <ul className="list-disc text-sm text-gray-700 pl-5 mt-2 space-y-1 print:text-xs" style={{ color: '#374151' }}>
@@ -1528,7 +1692,7 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
                       {isEditing ? (
                         <EditableText
                           value={exp.title || ""}
-                          onChange={(val) => updateField(["experience", idx, "title"], val)}
+                          onChange={(val) => updateField(["experience", idx.toString(), "title"], val)}
                           className="font-semibold text-gray-800 print:text-sm"
                         />
                       ) : (
@@ -1537,7 +1701,7 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
                       {isEditing ? (
                         <EditableText
                           value={exp.company || ""}
-                          onChange={(val) => updateField(["experience", idx, "company"], val)}
+                          onChange={(val) => updateField(["experience", idx.toString(), "company"], val)}
                           className="text-sm print:text-xs text-gray-700"
                         />
                       ) : (
@@ -1548,7 +1712,7 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
                       {isEditing ? (
                         <EditableText
                           value={exp.date || ""}
-                          onChange={(val) => updateField(["experience", idx, "date"], val)}
+                          onChange={(val) => updateField(["experience", idx.toString(), "date"], val)}
                           className="text-sm text-gray-600 print:text-xs"
                         />
                       ) : (
@@ -1560,7 +1724,7 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
                           {isEditing ? (
                             <EditableText
                               value={exp.location || ""}
-                              onChange={(val) => updateField(["experience", idx, "location"], val)}
+                              onChange={(val) => updateField(["experience", idx.toString(), "location"], val)}
                               className="text-xs text-gray-500 print:text-xs"
                             />
                           ) : (
@@ -1575,8 +1739,13 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
                       {isEditing ? (
                         <EditableList
                           items={exp.description}
-                          onChange={(newDesc) => updateField(["experience", idx, "description"], newDesc)}
+                          onChange={(newDesc) => updateField(["experience", idx.toString(), "description"], newDesc)}
                           className="list-disc list-inside space-y-1 text-sm text-gray-700 print:text-xs"
+                          aiContext={{
+                            title: exp.title,
+                            company: exp.company,
+                            skills: getSkillsString(),
+                          }}
                         />
                       ) : (
                         exp.description.map((desc: string, i: number) => (
@@ -1605,7 +1774,7 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
                       {isEditing ? (
                         <EditableText
                           value={edu.degree || ""}
-                          onChange={(val) => updateField(["education", idx, "degree"], val)}
+                          onChange={(val) => updateField(["education", idx.toString(), "degree"], val)}
                           className="font-semibold text-gray-800 print:text-sm"
                         />
                       ) : (
@@ -1614,7 +1783,7 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
                       {isEditing ? (
                         <EditableText
                           value={edu.institution || ""}
-                          onChange={(val) => updateField(["education", idx, "institution"], val)}
+                          onChange={(val) => updateField(["education", idx.toString(), "institution"], val)}
                           className="text-sm print:text-xs text-gray-700"
                         />
                       ) : (
@@ -1625,7 +1794,7 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
                       {isEditing ? (
                         <EditableText
                           value={edu.date || ""}
-                          onChange={(val) => updateField(["education", idx, "date"], val)}
+                          onChange={(val) => updateField(["education", idx.toString(), "date"], val)}
                           className="text-sm text-gray-600 print:text-xs"
                         />
                       ) : (
@@ -1637,7 +1806,7 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
                           {isEditing ? (
                             <EditableText
                               value={edu.location || ""}
-                              onChange={(val) => updateField(["education", idx, "location"], val)}
+                              onChange={(val) => updateField(["education", idx.toString(), "location"], val)}
                               className="text-xs text-gray-500 print:text-xs"
                             />
                           ) : (
@@ -2441,8 +2610,8 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
                   <div className="flex-1">
                     {isEditing ? (
                       <>
-                        <EditableText value={edu.institution || ""} onChange={v => updateField(["education", i, "institution"], v)} className="font-bold" />
-                        <EditableText value={edu.location || ""} onChange={v => updateField(["education", i, "location"], v)} className="ml-2 text-gray-600" />
+                        <EditableText value={edu.institution || ""} onChange={v => updateField(["education", i.toString(), "institution"], v)} className="font-bold" />
+                        <EditableText value={edu.location || ""} onChange={v => updateField(["education", i.toString(), "location"], v)} className="ml-2 text-gray-600" />
                       </>
                     ) : (
                       <>
@@ -2453,7 +2622,7 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
                   </div>
                   <div>
                     {isEditing ? (
-                      <EditableText value={edu.date || ""} onChange={v => updateField(["education", i, "date"], v)} className="font-semibold" />
+                      <EditableText value={edu.date || ""} onChange={v => updateField(["education", i.toString(), "date"], v)} className="font-semibold" />
                     ) : (
                       <span className="font-semibold">{edu.date}</span>
                     )}
@@ -2461,7 +2630,7 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
                 </div>
                 <div className="text-xs italic">
                   {isEditing ? (
-                    <EditableText value={edu.degree || ""} onChange={v => updateField(["education", i, "degree"], v)} />
+                    <EditableText value={edu.degree || ""} onChange={v => updateField(["education", i.toString(), "degree"], v)} />
                   ) : (
                     edu.degree
                   )}
@@ -2469,7 +2638,7 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
                 {(isEditing || edu.gpa) && (
                   <div className="text-xs">
                     {isEditing ? (
-                      <>CGPA: <EditableText value={edu.gpa || ""} onChange={v => updateField(["education", i, "gpa"], v)} className="inline-block w-20" /></>
+                      <>CGPA: <EditableText value={edu.gpa || ""} onChange={v => updateField(["education", i.toString(), "gpa"], v)} className="inline-block w-20" /></>
                     ) : (
                       <>CGPA: {edu.gpa}</>
                     )}
@@ -2490,9 +2659,9 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
                   <div className="flex-1">
                     {isEditing ? (
                       <>
-                        <EditableText value={exp.title || ""} onChange={v => updateField(["experience", i, "title"], v)} className="font-bold" />
+                        <EditableText value={exp.title || ""} onChange={v => updateField(["experience", i.toString(), "title"], v)} className="font-bold" />
                         <span className="mx-1">|</span>
-                        <EditableText value={exp.company || ""} onChange={v => updateField(["experience", i, "company"], v)} className="italic" />
+                        <EditableText value={exp.company || ""} onChange={v => updateField(["experience", i.toString(), "company"], v)} className="italic" />
                       </>
                     ) : (
                       <>
@@ -2504,7 +2673,7 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
                   </div>
                   <div>
                     {isEditing ? (
-                      <EditableText value={exp.date || ""} onChange={v => updateField(["experience", i, "date"], v)} className="font-semibold" />
+                      <EditableText value={exp.date || ""} onChange={v => updateField(["experience", i.toString(), "date"], v)} className="font-semibold" />
                     ) : (
                       <span className="font-semibold">{exp.date}</span>
                     )}
@@ -2514,7 +2683,7 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
                   {exp.description?.map((desc, j) => (
                     <li key={j}>
                       {isEditing ? (
-                        <EditableText value={desc} onChange={v => updateField(["experience", i, "description", j], v)} multiline />
+                        <EditableText value={desc} onChange={v => updateField(["experience", i.toString(), "description", j.toString()], v)} multiline />
                       ) : (
                         desc
                       )}
@@ -2535,11 +2704,11 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
                 <div className="text-xs">
                   {isEditing ? (
                     <>
-                      <EditableText value={proj.name || ""} onChange={v => updateField(["projects", i, "name"], v)} className="font-bold" />
+                      <EditableText value={proj.name || ""} onChange={v => updateField(["projects", i.toString(), "name"], v)} className="font-bold" />
                       {(isEditing || proj.link) && (
                         <>
                           <span className="mx-1">|</span>
-                          <EditableText value={proj.link || ""} onChange={v => updateField(["projects", i, "link"], v)} className="underline" />
+                          <EditableText value={proj.link || ""} onChange={v => updateField(["projects", i.toString(), "link"], v)} className="underline" />
                         </>
                       )}
                     </>
@@ -2557,7 +2726,7 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
                 </div>
                 <div className="text-xs">
                   {isEditing ? (
-                    <EditableText value={proj.description || ""} onChange={v => updateField(["projects", i, "description"], v)} multiline />
+                    <EditableText value={proj.description || ""} onChange={v => updateField(["projects", i.toString(), "description"], v)} multiline />
                   ) : (
                     proj.description
                   )}
@@ -2565,7 +2734,7 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
                 {(isEditing || proj.technologies) && (
                   <div className="text-xs italic">
                     {isEditing ? (
-                      <>Tech Stack: <EditableText value={proj.technologies?.join(", ") || ""} onChange={v => updateField(["projects", i, "technologies"], v.split(",").map(s => s.trim()))} /></>
+                      <>Tech Stack: <EditableText value={proj.technologies?.join(", ") || ""} onChange={v => updateField(["projects", i.toString(), "technologies"], v.split(",").map(s => s.trim()))} /></>
                     ) : (
                       <>Tech Stack: {proj.technologies?.join(", ")}</>
                     )}
@@ -2622,7 +2791,7 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
                 <li key={i} className={isEditing ? "border border-dashed border-blue-300 p-1 rounded hover:bg-blue-50" : ""}>
                   {isEditing ? (
                     <>
-                      <EditableText value={cert.name || ""} onChange={v => updateField(["certifications", i, "name"], v)} /> - <EditableText value={cert.issuer || ""} onChange={v => updateField(["certifications", i, "issuer"], v)} />
+                      <EditableText value={cert.name || ""} onChange={v => updateField(["certifications", i.toString(), "name"], v)} /> - <EditableText value={cert.issuer || ""} onChange={v => updateField(["certifications", i.toString(), "issuer"], v)} />
                     </>
                   ) : (
                     <>{cert.name} - {cert.issuer}</>
@@ -2637,7 +2806,7 @@ export const ResumePreview = forwardRef<ResumePreviewRef, ResumePreviewProps>(
   );
 
   // Main Render Switch - Each template maps to ONE specific layout
-  console.log('ResumePreview rendering template:', template);
+  logger.info(null, 'ResumePreview rendering template:', template);
   
   switch (true) {
     // Tech/Engineering Templates - Clean single-column with skills at top
