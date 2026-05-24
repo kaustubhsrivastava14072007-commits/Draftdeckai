@@ -5,6 +5,7 @@ import { createClient } from '@/lib/supabase/client';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { DeleteDialog } from '@/components/delete-dialog';
 import { Loader2, CreditCard, Calendar, AlertCircle, Crown } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
@@ -26,48 +27,47 @@ export default function SubscriptionPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [subscription, setSubscription] = useState<Subscription | null>(null);
-  const [user, setUser] = useState<any>(null);
+  const [isCancelDialogOpen, setIsCancelDialogOpen] = useState(false);
+  const [isCanceling, setIsCanceling] = useState(false);
 
   useEffect(() => {
-    fetchSubscription();
-  }, []);
+    const fetchSubscription = async () => {
+      try {
+        const supabase = createClient();
+        // Use getSession() for rate limit avoidance
+        const { data: { session } } = await supabase.auth.getSession();
+        const user = session?.user;
 
-  const fetchSubscription = async () => {
-    try {
-      const supabase = createClient();
-      // Use getSession() for rate limit avoidance
-      const { data: { session } } = await supabase.auth.getSession();
-      const user = session?.user;
+        if (!user) {
+          router.push('/auth/signin');
+          return;
+        }
 
-      if (!user) {
-        router.push('/auth/signin');
-        return;
+        const { data, error } = await supabase
+          .from('user_subscriptions')
+          .select(`
+            *,
+            subscription_plans (
+              name,
+              price,
+              billing_period
+            )
+          `)
+          .eq('user_id', user.id)
+          .single();
+
+        if (!error && data) {
+          setSubscription(data as any);
+        }
+      } catch (error) {
+        console.error('Error fetching subscription:', error);
+      } finally {
+        setLoading(false);
       }
+    };
 
-      setUser(user);
-
-      const { data, error } = await supabase
-        .from('user_subscriptions')
-        .select(`
-          *,
-          subscription_plans (
-            name,
-            price,
-            billing_period
-          )
-        `)
-        .eq('user_id', user.id)
-        .single();
-
-      if (!error && data) {
-        setSubscription(data as any);
-      }
-    } catch (error) {
-      console.error('Error fetching subscription:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
+    void fetchSubscription();
+  }, [router]);
 
   const handleManageBilling = async () => {
     try {
@@ -82,6 +82,44 @@ export default function SubscriptionPage() {
       }
     } catch (error) {
       toast.error('Failed to open billing portal');
+    }
+  };
+
+  const handleCancelSubscription = async () => {
+    try {
+      setIsCanceling(true);
+
+      const response = await fetch('/api/stripe/cancel-subscription', {
+        method: 'POST',
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to cancel subscription');
+      }
+
+      setSubscription((current) => {
+        if (!current) {
+          return current;
+        }
+
+        return {
+          ...current,
+          cancel_at_period_end: true,
+          current_period_end: data.subscription?.current_period_end || current.current_period_end,
+          status: data.subscription?.status || current.status,
+        };
+      });
+      setIsCancelDialogOpen(false);
+
+      toast.success('Your subscription will stay active until the end of the current billing period.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to cancel subscription';
+      toast.error(message);
+      throw error;
+    } finally {
+      setIsCanceling(false);
     }
   };
 
@@ -119,6 +157,9 @@ export default function SubscriptionPage() {
     canceled: 'bg-red-500',
     trialing: 'bg-blue-500',
   }[subscription.status] || 'bg-gray-500';
+  const canCancelSubscription =
+    !subscription.cancel_at_period_end &&
+    ['active', 'trialing'].includes(subscription.status);
 
   return (
     <div className="min-h-screen p-4 md:p-8">
@@ -209,6 +250,15 @@ export default function SubscriptionPage() {
             <Button onClick={() => router.push('/pricing')} className="w-full" variant="outline">
               Change Plan
             </Button>
+            {canCancelSubscription && (
+              <Button
+                onClick={() => setIsCancelDialogOpen(true)}
+                className="w-full"
+                variant="destructive"
+              >
+                Cancel Subscription
+              </Button>
+            )}
           </CardContent>
         </Card>
 
@@ -241,6 +291,21 @@ export default function SubscriptionPage() {
           </CardContent>
         </Card>
       </div>
+
+      <DeleteDialog
+        open={isCancelDialogOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            setIsCancelDialogOpen(false);
+          }
+        }}
+        onConfirm={handleCancelSubscription}
+        isDeleting={isCanceling}
+        title="Cancel Subscription"
+        description={`Are you sure you want to cancel your ${subscription.subscription_plans.name} plan? You'll keep access until ${new Date(subscription.current_period_end).toLocaleDateString()}, then premium features will end.`}
+        confirmLabel="Cancel subscription"
+        confirmingLabel="Canceling..."
+      />
     </div>
   );
 }

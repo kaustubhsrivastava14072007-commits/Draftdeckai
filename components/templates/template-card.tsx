@@ -96,7 +96,6 @@ export function TemplateCard({
       await onDelete(id);
     } finally {
       setIsDeleting(false);
-      setIsDeleteOpen(false);
     }
   };
 

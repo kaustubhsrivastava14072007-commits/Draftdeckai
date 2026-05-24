@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { DeleteDialog } from "@/components/delete-dialog";
 import {
   FileText,
   Presentation,
@@ -87,6 +88,17 @@ const contentTypeConfig = {
     gradient: "from-orange-500 to-amber-500",
   },
 };
+
+function buildHistoryStats(items: HistoryItem[]) {
+  return {
+    total: items.length,
+    resume: items.filter((item) => item.type === "resume").length,
+    presentation: items.filter((item) => item.type === "presentation").length,
+    generated: items.filter((item) => item.type === "generated").length,
+    diagram: items.filter((item) => item.type === "diagram").length,
+    letter: items.filter((item) => item.type === "letter").length,
+  };
+}
 
 // Helper function to get document description
 function getPresentationSlides(raw: any): any[] {
@@ -284,6 +296,8 @@ export function HistoryDashboard() {
   const [items, setItems] = useState<HistoryItem[]>([]);
   const [filteredItems, setFilteredItems] = useState<HistoryItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [itemPendingDeletion, setItemPendingDeletion] = useState<HistoryItem | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [stats, setStats] = useState({
     total: 0,
@@ -323,9 +337,15 @@ export function HistoryDashboard() {
     setFilteredItems(filtered);
   }, [activeTab, searchQuery, items]);
 
+  const applyItems = (nextItems: HistoryItem[]) => {
+    setItems(nextItems);
+    setStats(buildHistoryStats(nextItems));
+  };
+
   const fetchHistory = async () => {
     setIsLoading(true);
     try {
+
       // Use getSession() for rate limit avoidance (reads from local cache)
       const { data: { session } } = await supabase.auth.getSession();
       const user = session?.user;
@@ -383,17 +403,7 @@ export function HistoryDashboard() {
       // DEBUG: Log the final merged items
       console.log('📊 Final History Items:', allItems.length, 'items');
       
-      setItems(allItems);
-
-      // Calculate stats
-      setStats({
-        total: allItems.length,
-        resume: allItems.filter(i => i.type === 'resume').length,
-        presentation: allItems.filter(i => i.type === 'presentation').length,
-        generated: allItems.filter(i => i.type === 'generated').length,
-        diagram: allItems.filter(i => i.type === 'diagram').length,
-        letter: allItems.filter(i => i.type === 'letter').length,
-      });
+      applyItems(allItems);
     } catch (error) {
       console.error("Error fetching history:", error);
       toast({
@@ -647,14 +657,31 @@ export function HistoryDashboard() {
           <div className="h-full flex items-center justify-center">
             <FileText className="h-12 w-12 text-gray-300" />
           </div>
-        );
+      );
+    }
+  };
+
+  const getDestructiveItemLabel = (type: ContentType) => {
+    switch (type) {
+      case 'generated':
+        return 'document';
+      case 'presentation':
+        return 'presentation';
+      case 'resume':
+        return 'resume';
+      case 'diagram':
+        return 'diagram';
+      case 'letter':
+        return 'letter';
+      default:
+        return 'item';
     }
   };
 
   const handleDelete = async (item: HistoryItem) => {
-    if (!confirm(`Are you sure you want to delete "${item.title}"?`)) return;
-
     try {
+      setIsDeleting(true);
+
       // First try to delete from documents table
       const { error: docError } = await (supabase
         .from('documents' as any)
@@ -666,7 +693,8 @@ export function HistoryDashboard() {
           title: "Deleted",
           description: `${item.title} has been deleted`,
         });
-        fetchHistory();
+        setItemPendingDeletion(null);
+        await fetchHistory();
         return;
       }
 
@@ -681,7 +709,8 @@ export function HistoryDashboard() {
         description: `${item.title} has been deleted`,
       });
 
-      fetchHistory();
+      setItemPendingDeletion(null);
+      await fetchHistory();
     } catch (error) {
       console.error("Error deleting item:", error);
       toast({
@@ -689,6 +718,9 @@ export function HistoryDashboard() {
         description: "Failed to delete item",
         variant: "destructive",
       });
+      throw error;
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -885,7 +917,7 @@ export function HistoryDashboard() {
                                 variant="destructive"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  handleDelete(item);
+                                  setItemPendingDeletion(item);
                                 }}
                               >
                                 <Trash2 className="h-4 w-4" />
@@ -954,6 +986,31 @@ export function HistoryDashboard() {
           </Tabs>
         </div>
       </div>
+
+      <DeleteDialog
+        open={!!itemPendingDeletion}
+        onOpenChange={(open) => {
+          if (!open) {
+            setItemPendingDeletion(null);
+          }
+        }}
+        onConfirm={async () => {
+          if (!itemPendingDeletion) {
+            return;
+          }
+
+          await handleDelete(itemPendingDeletion);
+        }}
+        isDeleting={isDeleting}
+        title={`Delete ${itemPendingDeletion ? getDestructiveItemLabel(itemPendingDeletion.type) : 'item'}`}
+        description={
+          itemPendingDeletion
+            ? `Are you sure you want to delete "${itemPendingDeletion.title}"? This will permanently remove this ${getDestructiveItemLabel(itemPendingDeletion.type)} from your account.`
+            : 'This action cannot be undone.'
+        }
+        confirmLabel={`Delete ${itemPendingDeletion ? getDestructiveItemLabel(itemPendingDeletion.type) : 'item'}`}
+        confirmingLabel="Deleting..."
+      />
     </div>
   );
 }
